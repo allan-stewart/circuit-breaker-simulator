@@ -1,0 +1,235 @@
+<html>
+    <head>
+        <title>Circuit Breakers</title>
+        <link rel="stylesheet" href="style.css" type="text/css">
+        <script>
+            let module = {}
+        </script>
+        <script src="./src/app.js"></script>
+        <script src="./src/balancer.js"></script>
+        <script src="./src/breaker.js"></script>
+        <script src="./src/dependency.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.2/Chart.bundle.min.js"></script>
+    </head>
+    <body>
+        <h1>Circuit Breakers</h1>
+
+        <div class="column">
+            <div class="load-balancer">
+                <h2>Load balancer</h2>
+                Requests per second: <input id="requestsPerSecond" type="text" value="100">
+                <br/><input type="button" value="Start/Stop" onclick="toggleRunState()">
+            </div>
+        </div>
+
+        <div class="column">
+            <h2>Apps</h2>
+            Instances: <input id="appCount" type="text" value="2" onchange="updateAppCount()">
+            <div id="appArea"></div>
+        </div>
+
+        <div class="column">
+            <h2>Dependency</h2>
+            Failure rate: <input id="failureRate" type="text" value=".05" onchange="updateFailureRate()">
+            <br/>Max requests per second: <input id="maxRPS" type="text" value="1000" onchange="updateMaxRPS()">
+            <br/>Ramp up requests per second: <input id="rampUpRPS" type="text" value="25" onchange="updateRampUpRPS()">
+            <br/><input type="button" value="Reset" onclick="resetDependency()">
+            <br/><canvas id="dependencyCanvas" width="200" height="100"></canvas>
+            <span id="dependencyRPS">0</span> requests per second
+        </div>
+
+        <script>
+            const apps = []
+            const dependency = createDependency()
+            dependency.chartData = {
+                labels: new Array(60).fill(0),
+                datasets: [
+                    { backgroundColor: '#00aa00', data: new Array(60).fill(0) },
+                    { backgroundColor: '#ff0000', data: new Array(60).fill(0) }
+                ]
+            }
+            dependency.chart = new Chart(document.getElementById(`dependencyCanvas`), {
+                type: 'bar',
+                data: dependency.chartData,
+                options: {
+                    legend: {
+                        display: false,
+                        labels: { display: false }
+                    },
+                    scales: {
+                        xAxes: [ { ticks: { display: false }, stacked: true, gridLines: { display: false, drawBorder: false }, categoryPercentage: 1.0, barPercentage: 1.0 } ],
+                        yAxes: [ { ticks: { display: false }, stacked: true, gridLines: { display: false, drawBorder: false } } ]
+                    }
+                }
+            })
+
+            const updateFailureRate = () => {
+                const rate = document.getElementById('failureRate').value
+                dependency.setFailureRate(rate)
+            }
+
+            const updateMaxRPS = () => {
+                const rate = document.getElementById('maxRPS').value
+                dependency.setMaxRPS(rate)
+            }
+
+            const updateRampUpRPS = () => {
+                const rate = document.getElementById('rampUpRPS').value
+                dependency.setRampUpRPS(rate)
+            }
+
+            const resetDependency = () => {
+                dependency.reset()
+            }
+
+            const updateAppCount = () => {
+                const count = document.getElementById('appCount').value
+                
+                while (apps.length < count) {
+                    const newApp = createApp(createBreaker(), dependency.query)
+                    newApp.chartData = {
+                        labels: new Array(60).fill(0),
+                        datasets: [
+                            { backgroundColor: '#00aa00', data: new Array(60).fill(0) },
+                            { backgroundColor: '#ffff00', data: new Array(60).fill(0) },
+                            { backgroundColor: '#ff0000', data: new Array(60).fill(0) }
+                        ]
+                    }
+                    apps.push(newApp)
+                }
+                while (apps.length > count) {
+                    apps.pop()
+                }
+
+                document.getElementById('appArea').innerHTML = ''
+                apps.forEach(drawApp)
+            }
+
+            const drawApp = (app, index) => {
+                const appId = `appNumber${index}`
+                app.appId = appId
+                div = document.createElement('div')
+                div.id = appId
+                div.className = "app"
+                div.innerHTML = `App ${index}` +
+                    `<br/>Breaker state: <select id="${appId}BreakerState" onchange="setBreakerState('${appId}')"><option value="closed">Closed</option><option value="open">Open</option><option value="tripped">Tripped</option><option value="disabled">Disabled</option></select>` +
+                    `<br/>Trip threshold: <input id="${appId}TripThreshold" type="text" value=".5" onchange="setTripThreshold('${appId}')">` +
+                    `<br/>Close threshold: <input id="${appId}CloseThreshold" type="text" value=".1" onchange="setCloseThreshold('${appId}')">` +
+                    `<br/>Max Throttle: <input id="${appId}MaxThrottle" type="text" value=".9" onchange="setMaxThrottle('${appId}')">` +
+                    `<br/>Easing: <select id="${appId}Easing" onchange="setEasing('${appId}')"><option value="sine">sine</option><option value="linear">linear</option></select>` +
+                    `<br/><canvas id="${appId}Canvas" width="200" height="50"></canvas>` +
+                    `<span id="${appId}RPS">0</span> requests per second`
+                document.getElementById('appArea').appendChild(div)
+
+                const canvas = document.getElementById(`${appId}Canvas`)
+                app.chart = new Chart(canvas, {
+                    type: 'bar',
+                    data: app.chartData,
+                    options: {
+                        legend: {
+                            display: false,
+                            labels: { display: false }
+                        },
+                        scales: {
+                            xAxes: [ { ticks: { display: false }, stacked: true, gridLines: { display: false, drawBorder: false }, categoryPercentage: 1.0, barPercentage: 1.0 } ],
+                            yAxes: [ { ticks: { display: false }, stacked: true, gridLines: { display: false, drawBorder: false } } ]
+                        }
+                    }
+                })
+            }
+
+            const pushChartValue = (app, index, value) => {
+                app.chartData.datasets[index].data.push(value)
+                app.chartData.datasets[index].data.shift()
+            }
+
+            const setBreakerState = (appId) => {
+                const select = document.getElementById(`${appId}BreakerState`)
+                const newValue = select.options[select.selectedIndex].value
+                const app = apps.find(x => x.appId == appId)
+                switch (newValue) {
+                    case 'open': app.breaker.open(); break
+                    case 'closed': app.breaker.close(); break
+                    case 'tripped': app.breaker.trip(); break
+                    case 'disabled': app.breaker.disable(); break
+                    default: throw new Error(`Something broke: ${newValue}`)
+                }
+            }
+
+            const updateBreakerState = (app) => {
+                document.getElementById(`${app.appId}BreakerState`).value = app.breaker.state()
+            }
+
+            const setTripThreshold = (appId) => {
+                const value = document.getElementById(`${appId}TripThreshold`).value
+                apps.find(x => x.appId == appId).breaker.setTripThreshold(value)
+            }
+
+            const setCloseThreshold = (appId) => {
+                const value = document.getElementById(`${appId}CloseThreshold`).value
+                apps.find(x => x.appId == appId).breaker.setCloseThreshold(value)
+            }
+
+            const setMaxThrottle = (appId) => {
+                const value = document.getElementById(`${appId}MaxThrottle`).value
+                apps.find(x => x.appId == appId).breaker.setMaxThrottle(value)
+            }
+
+            const setEasing = (appId) => {
+                const select = document.getElementById(`${appId}Easing`)
+                const newValue = select.options[select.selectedIndex].value
+                const app = apps.find(x => x.appId == appId)
+                app.breaker.setEasing(easingFunctions[newValue])
+                console.log(appId, newValue, easingFunctions[newValue])
+            }
+
+            const tick = () => {
+                const requests = balancer.servers(apps.length).balance(document.getElementById('requestsPerSecond').value)
+                
+                for (let i = 1; i <= requests[0]; i++) {
+                    apps.forEach((app, index) => {
+                        document.getElementById(`${app.appId}RPS`).innerHTML = requests[index]
+                        if (i <= requests[index]) {
+                            app.handleTraffic()
+                        }
+                    })
+                }
+
+                apps.forEach((app, index) => {
+                    const result = app.getTotals()
+                    pushChartValue(app, 0, result.succeeded)
+                    pushChartValue(app, 1, result.tripped)
+                    pushChartValue(app, 2, result.errors)
+                    app.chart.update()
+                    app.resetTotals()
+                    updateBreakerState(app)
+                })
+                
+                var dependencyStats = dependency.stats()
+                pushChartValue(dependency, 0, (dependencyStats.requestsThisTick - dependencyStats.errorsThisTick))
+                pushChartValue(dependency, 1, (dependencyStats.errorsThisTick))
+                document.getElementById('dependencyRPS').innerHTML = dependencyStats.requestsThisTick
+                dependency.chart.update()
+                dependency.tick()
+            }
+
+            let interval
+
+            const startup = () => {
+                updateAppCount()
+                toggleRunState()
+            }
+
+            const toggleRunState = () => {
+                if (interval) {
+                    clearInterval(interval)
+                    interval = null
+                } else {
+                    interval = setInterval(tick, 1000)
+                }
+            }
+
+            startup()
+        </script>
+    </body>
+</html>

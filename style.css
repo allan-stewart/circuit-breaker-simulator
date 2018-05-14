@@ -1,0 +1,27 @@
+body {
+    font-family: Helvetica, Arial, sans-serif
+}
+
+.column {
+    max-width: 300px;
+    border: 1px solid black;
+    margin: 10px;
+    padding: 10px;
+    float: left;
+}
+
+.app {
+    border: 1px solid black;
+    background-color: lightcyan;
+    margin: 10px 0;
+    padding: 5px;
+}
+
+canvas {
+    display: block;
+    margin-top: 5px;
+}
+
+input[type="text"] {
+    width: 40px;
+}
